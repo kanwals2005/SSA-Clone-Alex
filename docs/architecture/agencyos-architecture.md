@@ -50,7 +50,7 @@ These facts are load-bearing; the design treats them as constraints, not assumpt
 | Convex execution | Queries/mutations are transactional and retried; **actions are at-most-once and never auto-retried** (side effects can't be safely replayed). Durable multi-step jobs use the Workflow/Workpool components |
 | Convex authorization | Application-level. There is no database-enforced row security; every public function must implement authorization in code |
 | Convex backup/export | Snapshot covers **table data + file storage only** — not code, config, environment variables, or pending scheduled functions |
-| Cloudflare R2 | Strongly consistent; concurrent writes to one key are **last-writer-wins**; there is **no append** primitive. Jurisdiction is fixed at bucket creation and cannot be changed |
+| Cloudflare R2 | Strongly consistent; concurrent writes to one key are **last-writer-wins**; there is **no append** primitive and **no native S3 object versioning** (`GetBucketVersioning` / `PutBucketVersioning` unimplemented). Supported durability primitives: conditional writes (`If-None-Match` / `If-Match` on `PutObject`; Workers `onlyIf`) and **bucket locks** (prefix retention that blocks overwrite/delete while active). Jurisdiction is fixed at bucket creation and cannot be changed |
 | TCPA/FCC (US) | Revocation rules effective 2025-04-11: honor **any reasonable revocation method** (including STOP/QUIT/END/REVOKE/OPT OUT/CANCEL/UNSUBSCRIBE) within ≤10 business days. The "revoke-all-topics" scope rule is waived until **2027-01-31** (FCC DA-26-12) — this design honors revocation globally anyway. Marketing texts require prior express written consent; telemarketing quiet hours are 8am–9pm recipient-local; state mini-TCPAs (FL, OK, WA, …) can be stricter |
 | CAN-SPAM (email) | Accurate sender identity, postal address, functioning opt-out honored within 10 business days |
 | Call recording law | Federal baseline is one-party consent (18 U.S.C. §2511); California (Penal §632), Florida (§934.03) and other states require all-party consent. Lawful capture, present ownership/license, and permission to disclose to processors are **separate facts** |
@@ -100,7 +100,7 @@ Every component and phase must preserve these. A change that breaks one is a red
 - **I1 — Five-class separation.** Raw evidence, canonical structured data, AI interpretations, human actions, and AI recommendations are distinct, permanently distinguishable record classes (§9). Outcomes are canonical data derived from evidence.
 - **I2 — Event-time honesty.** Every record carries `occurredAt` and `observedAt` (when AgencyOS learned it). An evaluation as of time T may read only records with `observedAt ≤ T`. No feature, retrieval result, or label may leak information from after the decision it evaluates (§9.3, §11).
 - **I3 — Consent enforcement, honestly scoped.** Every AgencyOS-originated outbound side effect passes one authorization operation (`authorizeAndEnqueueSend`); nothing else in the system holds provider credentials. Sends that originate natively in GHL are **observed, not enforced**, and are never claimed otherwise (§6).
-- **I4 — Tenant isolation by construction.** Tenant scope is derived server-side from the authenticated principal through one authorization helper on every public entrypoint. No data crosses tenants except through explicit, audited, opt-in aggregation (§5, §15).
+- **I4 — Tenant isolation by construction.** Tenant scope is an AgencyOS-owned `tenantId`, never a raw GHL company/location ID. For interactive principals it is derived server-side through one authorization helper; for provider ingress it is derived only via a verified installation→tenant mapping. Unknown or ambiguous mappings fail closed. No data crosses tenants except through explicit, audited, opt-in aggregation (§5, §15).
 - **I5 — Untrusted content never becomes instructions.** All CRM, lead, file, transcript, retrieval, and tool text is data, never system/developer instruction (§12).
 - **I6 — Attributable AI.** Every interpretation and recommendation records model, prompt/template version, source evidence IDs, and creation time; every displayed draft has an immutable ID so human reuse is traceable (§9, §11).
 - **I7 — Replaceable consumers.** GHL, Convex, model providers, Hermes, and Prime Intellect are each replaceable without losing the proprietary asset (ledger + evidence + evals). Exit paths are designed, not hoped for (§14).
@@ -176,13 +176,38 @@ flowchart LR
 
 ## 5. Identity and tenancy
 
-An `agencyId` column is a partition key, not a security boundary or a person. Both concepts get first-class models.
+An `agencyId` column is a partition key, not a security boundary or a person. Both concepts get first-class models. External GHL IDs are mappings into AgencyOS identity — never the authorization boundary itself.
+
+### 5.0 Tenant and GHL installation binding
+
+Minimum durable contract (Phase 0 schema):
+
+- **`tenant`** — AgencyOS-owned row with immutable internal `tenantId`. Created by AgencyOS (owner onboarding), never minted from a provider ID.
+- **`integrationInstallation`** — AgencyOS-owned row with immutable internal `integrationInstallationId`. One row per successful binding of a verified external install context to exactly one `tenantId`.
+  - **Location-scoped installation:** INSTALL/UNINSTALL payloads that include `locationId` ([AppInstall](https://marketplace.gohighlevel.com/docs/webhook/AppInstall/) / [AppUninstall](https://marketplace.gohighlevel.com/docs/webhook/AppUninstall/)). External key: `(vendor=ghl, appId, locationId)`.
+  - **Agency-scoped installation:** INSTALL/UNINSTALL payloads that include `companyId` and omit `locationId` (agency-level AppInstall example). External key: `(vendor=ghl, appId, companyId)`. Corresponds to Company / bulk-install token flows in [App Distribution](https://marketplace.gohighlevel.com/docs/oauth/AppDistribution/).
+- **`installationLocationMembership`** — AgencyOS-owned row binding a verified `locationId` to an **agency-scoped** `integrationInstallationId` (and that installation's `tenantId`). Required because ordinary CRM webhooks (e.g. [InboundMessage](https://marketplace.gohighlevel.com/docs/webhook/InboundMessage/)) carry `locationId` only — not `companyId` — so an agency install keyed by `companyId` alone cannot authorize location events by inference.
+- **Verified external mapping fields (no invented provider IDs):** `vendor = ghl`; AgencyOS's known Marketplace `appId` (subscription config — not a per-event field on ordinary CRM webhooks); `companyId` when present on lifecycle payloads; `locationId` when present. Active uniqueness: each active external install key → exactly one `integrationInstallationId`/`tenantId`; each active `(appId, locationId)` membership → exactly one agency-scoped `integrationInstallationId`.
+- **Authoritative location-membership sources (never the inbound CRM event alone):**
+  1. Signed `INSTALL` whose payload includes `locationId` — activates a location-scoped installation, or, when an agency-scoped installation already exists for `(appId, companyId)` from the same payload's `companyId`, records/activates membership under that agency installation.
+  2. Provider reconciliation via [Get Location where app is installed](https://marketplace.gohighlevel.com/docs/ghl/oauth/get-installed-location/) (`GET /oauth/installedLocations`) using the agency app token — App Distribution Step 2 for bulk/agency installs.
+  3. Optional corroboration: successful [Get Location Access Token from Agency Token](https://marketplace.gohighlevel.com/docs/ghl/oauth/get-location-access-token/) (`POST /oauth/locationToken` with documented `companyId` + `locationId`). Corroboration does not replace recording the membership before accepting ingress.
+  Locations missing from the authoritative set are **deactivated**; they are never re-activated by observing `InboundMessage`/`OutboundMessage` traffic.
+- **Lifecycle / no stale authorization:**
+  - Location-scoped `UNINSTALL` (`locationId` present): deactivate that location-scoped installation and any `(appId, locationId)` membership row.
+  - Agency-scoped `UNINSTALL` (`companyId` present, no `locationId`): deactivate that installation **and all** of its `installationLocationMembership` rows.
+  - Reinstall: new `integrationInstallationId` generation; prior installation/memberships stay inactive and must not authorize ingress.
+  - Reconciliation applies additions/removals under the current agency installation only; removals deactivate immediately.
+- **Ingress derivation:** webhook signature authenticity proves the delivery is from GHL, not which tenant it belongs to.
+  - **Ordinary location events** (`locationId` in payload): resolve active candidates for AgencyOS `appId` + `locationId` with deterministic precedence — (1) active **location-scoped** `integrationInstallation` for `(appId, locationId)`; else (2) active **`installationLocationMembership`** for `(appId, locationId)` → its agency-scoped `integrationInstallationId` → `tenantId`. Accept only when **exactly one** installation remains. **Zero or multiple** matches fail closed (no default tenant; do not infer `companyId` from the event).
+  - **Agency lifecycle events** (`companyId`, no `locationId`): resolve `(appId, companyId)` → agency-scoped installation only.
+- **Scoping rule (unchanged):** every inbound receipt, replay/idempotency key, evidence object key, and reconciliation cursor is namespaced by `(tenantId, integrationInstallationId)` (§7.2, §8.1, §8.3). For locations under an agency install, that id is the agency-scoped installation that owns the verified membership.
 
 ### 5.1 Principals and authorization
 
-- Tables: `principal` (human or service identity), `membership` (principal × tenant × role), `role` (owner / operator / engineer-admin / service:ingest / service:brain / service:dispatch).
-- **One authorization helper wraps every public query, mutation, action, HTTP endpoint, scheduled job, search (FTS and vector), and export job.** It authenticates the principal, derives tenant scope server-side, and injects it into the query context. Client-supplied tenant IDs are never trusted as authorization. Convex document IDs are unguessable but every fetched document is still ownership-checked against the derived scope.
-- Enforcement is testable: CI includes cross-tenant probes — foreign IDs, pagination cursors, full-text and vector queries, HTTP routes, scheduled jobs, exports, and credential access must all fail closed (§15.3).
+- Tables: `tenant`, `integrationInstallation`, `installationLocationMembership` (§5.0); `principal` (human or service identity), `membership` (principal × tenant × role), `role` (owner / operator / engineer-admin / service:ingest / service:brain / service:dispatch).
+- **One authorization helper wraps every public query, mutation, action, HTTP endpoint, scheduled job, search (FTS and vector), and export job.** Interactive callers: authenticate the principal, derive tenant scope server-side, inject it into the query context. Provider ingress (signed webhooks): authenticate the provider signature, then derive tenant scope only via §5.0 installation mapping (including verified location membership for agency installs). Client-supplied tenant IDs are never trusted as authorization. Convex document IDs are unguessable but every fetched document is still ownership-checked against the derived scope.
+- Enforcement is testable: CI includes cross-tenant probes — foreign IDs, pagination cursors, full-text and vector queries, HTTP routes, scheduled jobs, exports, credential access, and **unsigned / unknown-installation / unbound-locationId** webhooks must all fail closed (§15.3).
 - If a future contract requires hard isolation beyond application-level guarantees, that tenant gets a separate Convex deployment; the schema supports this because no cross-tenant join exists to break.
 
 ### 5.2 Persons, contact points, and source contacts
@@ -253,7 +278,7 @@ No event is "covered" until it has a row here **and** a captured, signature-veri
 | `OpportunityCreate/StageUpdate/StatusUpdate` | Marketplace app webhook | OAuth app | Ed25519 raw-byte | opportunityId + eventTs | opportunityId | opportunities search |
 | `AppointmentCreate/Update/Delete` | Marketplace app webhook | OAuth app | Ed25519 raw-byte | appointmentId + eventTs | calendarId | calendar events range |
 | `InvoicePaid` / `OrderStatusUpdate` | Marketplace app webhook | OAuth app | Ed25519 raw-byte | invoiceId/orderId + eventTs | contactId | payments/orders list |
-| App `INSTALL` / `UNINSTALL` | Default webhook URL | OAuth app | Ed25519 raw-byte | installId | companyId | installedLocations |
+| App `INSTALL` / `UNINSTALL` | Default webhook URL | OAuth app | Ed25519 raw-byte | `appId` + (`locationId` \|\| `companyId`) + `type` (no provider `installId` exists) | `locationId` or `companyId` | `GET /oauth/installedLocations` + location-token exchange; maintains §5.0 `integrationInstallation` and `installationLocationMembership` |
 | Custom workflow webhooks (only if a GHL workflow must signal AgencyOS) | Workflow action | Per-workflow rotating shared secret | Secret compare + payload schema | workflowExecutionId | n/a | none — treated as hints, never authoritative |
 
 **Signature rule:** verify `X-GHL-Signature` (Ed25519) over raw bytes before any parsing; reject on failure; no legacy fallback (retired 2026-07-01). Workflow webhooks have a separate rotating-secret contract and are advisory only.
@@ -275,8 +300,9 @@ Backfill of the 5–6k contacts, threads, and opportunity/tag history is a defin
 
 ### 8.1 Inbound: durable inbox
 
-- Every webhook delivery is archived raw (§8.3) and recorded as an `inboundReceipt` with deterministic ID `hash(source, replayKey)`. Duplicate deliveries hit the same receipt: **one ledger row and one evidence object** per logical event.
-- Upserts into canonical tables are idempotent on external IDs. Ordering is restored via ordering keys, not assumed from arrival.
+- Every webhook delivery is signature-verified, then tenant-resolved via §5.0 **before** ledger writes. Unknown/ambiguous installation mappings are rejected (fail closed) and never create receipts under a guessed tenant.
+- Every accepted delivery is archived raw (§8.3) and recorded as an `inboundReceipt` with deterministic ID `hash(tenantId, integrationInstallationId, source, replayKey)`. Duplicate deliveries hit the same receipt: **one ledger row and one evidence object** per logical event within that installation.
+- Upserts into canonical tables are idempotent on external IDs scoped by tenant/installation. Ordering is restored via ordering keys, not assumed from arrival.
 - Nightly reconciliation sweeps (list-since cursors per §7.2) catch dropped events; drift repairs are logged as corrections with provenance (§9.2).
 
 ### 8.2 Outbound: outbox with explicit uncertainty
@@ -291,12 +317,14 @@ Convex actions are at-most-once and not auto-retried; provider timeouts are ambi
 
 ### 8.3 Evidence store semantics
 
-R2 objects are last-writer-wins with no append primitive, so "append-only JSONL" is not a durability contract. Instead:
+R2 objects are last-writer-wins with **no append primitive and no native object versioning**. "Append-only JSONL" and "R2 versions" are not durability contracts. Instead:
 
-- **One immutable object per artifact** — webhook payload, call audio file, transcript version, model I/O record — under a deterministic key: `{tenant}/{class}/{externalId or receiptId}/{artifactVersion}`.
-- Object metadata records content hash, size, tenant, and retention class. Objects are never rewritten; a corrected artifact is a new version object.
+- **One immutable object per artifact** — webhook payload, call audio file, transcript version, model I/O record — under a deterministic key: `{tenantId}/{integrationInstallationId}/{class}/{externalId or receiptId}/{artifactVersion}` where `artifactVersion` is an **explicit application-level** version (integer or content-addressed suffix), not an S3 version id.
+- **Create-only writes:** every evidence `PutObject` (or Workers `put`) uses `If-None-Match: *` / `onlyIf` create-only semantics. On success, store content hash, size, etag, tenant, installation, retention class, and `lockUntil` in object metadata + ledger pointer.
+- **Idempotency vs collision:** on `412 PreconditionFailed`, `HeadObject` and compare content hash to the ledger expectation — **same hash → treat as duplicate success** (idempotent redelivery); **different hash → fail closed** as a detectable collision (never overwrite; never silently substitute evidence). History is the set of distinct application-versioned keys plus their hashes — reproducible without native versioning.
+- **Corrected artifacts** are new keys with a new `artifactVersion`; prior keys remain until the purge machine deletes them under policy.
 - Compaction into JSONL/Parquet for analytics/export is a **derived batch output** to separate keys — never a read-merge-reupload of the evidence objects themselves.
-- Bucket protection: versioning and finite bucket-lock policies consistent with the retention matrix (§13.2) — locks must not conflict with the purge machine (§13.3).
+- **Bucket locks (finite, retention-aligned):** use R2 bucket-lock rules on evidence prefixes to block overwrite/delete for the retention window (or shorter quarantine window). Do **not** rely on indefinite locks for ordinary evidence classes. Locks are an immutability aid; they are not a substitute for create-only writes.
 
 ---
 
@@ -335,7 +363,14 @@ R2 objects are last-writer-wins with no append primitive, so "append-only JSONL"
 
 ### 10.1 Rights before processing
 
-Lawful recording at capture, present ownership/license, participant jurisdictions, and permission to disclose to processors are separate facts, and none is assumed. The pipeline order is:
+Lawful recording at capture, present ownership/license, participant jurisdictions, and permission to disclose to processors are separate facts, and none is assumed. Capability states stay distinct and ordered:
+
+```text
+technical access → copy/possession authority → processor/storage authority
+  → transcription → analysis → retention → learning use
+```
+
+Default pipeline order (no audio bytes leave the source system until the required authority for that step exists):
 
 ```text
 inventory (metadata only) → rights manifest → acquire → archive → transcribe + diarize → extract → link → aggregate
@@ -343,8 +378,12 @@ inventory (metadata only) → rights manifest → acquire → archive → transc
 
 1. **Inventory without media.** Enumerate the ~200 recordings' metadata (source system, date, participants, duration) without copying audio.
 2. **Per-call rights manifest** — required before download, archive, transcription, retrieval, or model use: source/owner and license; participant jurisdictions (one-party vs all-party); notice/consent evidence at capture; permitted purposes; processor permissions (which vendors may receive it); retention class.
-3. **Quarantine by default.** Recordings without a completed manifest are counted and quarantined — not processed.
-4. **Narrow expiry exception:** where a documented risk of source deletion exists (e.g., recorder retention windows), a **storage-only quarantine copy** may be taken into a locked, access-restricted bucket prefix before full clearance — with owner sign-off recorded, no vendor disclosure, no transcription, no indexing, no model access, and scheduled deletion if rights are not established within the review window. This trades a bounded, controlled holding risk against irreversible evidence loss; it grants zero processing rights.
+3. **Quarantine by default.** Recordings without a completed manifest are counted and remain metadata-only — not copied, not processed.
+4. **Narrow expiry exception (preservation copy only):** where a documented risk of source deletion exists (e.g., recorder retention windows), audio bytes may leave the source **only after** a limited preservation-authorization record exists for that call, proving at minimum:
+   - **copy/possession authority** for preservation-only holding (not transcription, analysis, or learning);
+   - **processor/storage authority** for Cloudflare R2 as storage processor (DPA in force, residency/jurisdiction acceptable, allowlist entry) — storing Customer Content in R2 is processor disclosure under Cloudflare's DPA; "no vendor disclosure" is therefore false if R2 is used;
+   - **`lockUntil` / `deleteAt`** aligned with the review window and enforced via §8.3 create-only write + finite bucket-lock prefix.
+   Owner sign-off is recorded. The copy grants **zero** transcription, indexing, model, or learning rights. If full §10.1.2 rights are not established by `deleteAt`, the preservation object is deleted (or remains undeletable-only until a finite lock expires, then deletes — never "closed purged" while still locked; §13.3). Without the preservation-authorization record, remain metadata-only even if the source is about to expire.
 
 ### 10.2 Cleared-call pipeline
 
@@ -464,7 +503,9 @@ Every data class in §9 has an inventory row: purpose, legal basis posture, stor
 
 ### 13.3 Deletion: an idempotent purge machine
 
-Contact-level purge runs a resumable state machine: `requested → identity-validated → holds-checked → canonical-tombstoned → derived-purged (interpretations, FTS/vector indexes) → evidence-objects-deleted (all versions) → exports-rotated → vendor-erasure-requested → receipts-recorded → closed`. Legal holds pause it; suppression survives it as a minimal tombstone (hashed contact point, reason, timestamp) so a deleted person is not re-contacted. Backups age out within the 35-day window; the purge record proves timing. Deletion receipts from vendors are stored as evidence.
+Contact-level purge runs a resumable state machine: `requested → identity-validated → holds-checked → canonical-tombstoned → derived-purged (interpretations, FTS/vector indexes) → evidence-objects-deleted (all application-versioned keys for the subject) → exports-rotated → vendor-erasure-requested → receipts-recorded → closed`. Legal holds pause it; suppression survives it as a minimal tombstone (hashed contact point, reason, timestamp) so a deleted person is not re-contacted. Backups age out within the 35-day window; the purge record proves timing. Deletion receipts from vendors are stored as evidence.
+
+**Lock-aware completion:** R2 bucket locks block overwrite/delete while active (`ObjectLockedByBucketPolicy`). The purge machine **must not** transition to `closed` while any targeted evidence object still exists under an active lock or returns a lock/precondition error on delete. Required behavior: remain in `evidence-objects-deleted` (or an explicit `awaiting-lock-expiry` substate), retry after finite `lockUntil`, and record which keys remain. A purge that reports completion while locked evidence still exists is a failed purge.
 
 ### 13.4 Model gateway logging
 
@@ -482,7 +523,7 @@ Two disciplines, deliberately separate:
 
 ### 14.1 Operational backup and restore
 
-- Daily scheduled Convex backups (tables + file storage) and R2 versioning/locks per retention matrix. Targets (ratified in ADR-011): **RPO 24h, RTO 4h**.
+- Daily scheduled Convex backups (tables + file storage) and R2 create-only evidence writes + finite bucket locks per retention matrix (§8.3). Targets (ratified in ADR-011): **RPO 24h, RTO 4h**.
 - A backup excludes code, configuration, environment variables, and scheduled state — so the restore runbook includes redeploying source, re-applying environment variables from the secret store, and re-seeding crons. **Quarterly restore drills into a clean deployment** prove the runbook, not the file format.
 
 ### 14.2 Vendor-exit export
@@ -547,18 +588,18 @@ Dependency-ordered. No phase starts until its predecessor's exit criteria are me
 **Work:**
 - **Budget + operating card:** a written budget (the number Alex asked for `[call-01 0026–0033]`) and a bounded, human-accountable operating card held by Kamal for infrastructure, transcription, and approved assets — caps, receipts logged to the ledger. Autonomous agent spend remains Phase 4.
 - **AOV discovery lane (parallel, time-boxed, business workstream):** VSL/checkout teardown; name the smallest upsell hypothesis testable after the lead audit. The architecture's obligation is measurement.
-- Convex project + schema v0: identity/tenancy tables and authorization helper **[GATE: tenant identity]**; consent events + policy state **[GATE: consent]**; five-class tables with `occurredAt`/`observedAt` **[GATE: event-time]**; R2 buckets with jurisdiction + retention classes.
+- Convex project + schema v0: `tenant` + `integrationInstallation` + `installationLocationMembership` + identity/authorization helper **[GATE: tenant identity / §5.0 GHL binding]**; consent events + policy state **[GATE: consent]**; five-class tables with `occurredAt`/`observedAt` **[GATE: event-time]**; R2 buckets with jurisdiction + retention classes + create-only write path.
 - GHL Private Marketplace OAuth app + PIT; event transport matrix complete; **signed sandbox fixture per subscribed event** replayed through Ed25519 raw-byte verification.
 - Inbox/outbox with deterministic IDs; reconciliation cron; failure-injection tests at each Convex ↔ R2 ↔ provider boundary.
 - Governance: ADR-003/005/006/007 status updates applied; superseded docs carry status banners; ADR-008…015 stubs created (§18); CI with typecheck + ingestion tests.
 
-**Exit criteria:** test event round-trips to ledger + evidence object in <1 min; duplicate webhook produces one ledger row **and** one object; reconciliation catches an intentionally dropped event; crash-injection at each boundary recovers without loss or duplication; cross-tenant probe fails closed; unsigned/invalid-signature webhook rejected; budget ratified and card issued; zero writes to GHL.
+**Exit criteria:** test event round-trips to ledger + evidence object in <1 min; duplicate webhook produces one ledger row **and** one object; create-only collision (same key, different hash) fails closed; reconciliation catches an intentionally dropped event; crash-injection at each boundary recovers without loss or duplication; cross-tenant probe fails closed; unsigned/invalid-signature, unknown-installation, and **unbound-locationId** (no verified membership under an agency install) webhooks rejected; budget ratified and card issued; zero writes to GHL.
 
 ### Phase 1 — Historical corpus + audit (first proprietary dataset)
 
 **Work:** resumable backfill per §7.3; call inventory → rights manifests → cleared-call pipeline (§10) **[GATE: call rights]**; consent-posture inference with a human/counsel-verified evidence sample (n ≥ 30) per segment; closed/lost labeling with human verification; **lead inventory audit report** + dormant-segment rankings with per-segment sendability; pain/objection taxonomy v1 with span citations; processor/DPA inventory before corpus copies.
 
-**Exit criteria:** backfill completeness stated per channel with reconciliation-verified denominators and checksummed archives; **every rights-cleared recording transcribed; unresolved recordings counted and quarantined** (expiry-exception copies logged with owner sign-off); closed-won count known and human-verified; audit delivered and Alex has actioned ≥1 dormant segment manually (informed by consent posture; AgencyOS queues nothing to uncleared destinations).
+**Exit criteria:** backfill completeness stated per channel with reconciliation-verified denominators and checksummed archives; **every rights-cleared recording transcribed; unresolved recordings counted and left metadata-only** (preservation copies only when §10.1.4 authorization exists, with owner sign-off and `deleteAt`); closed-won count known and human-verified; audit delivered and Alex has actioned ≥1 dormant segment manually (informed by consent posture; AgencyOS queues nothing to uncleared destinations).
 
 ### Phase 2 — Copilot + shadow mode + sealed evals
 
@@ -622,7 +663,7 @@ Surfaced, not designed around. Ordered by how much they can hurt.
 
 1. **Consent posture of the 5–6k leads** — what consent language existed at capture? Blocker for Phase 3 outbound; does not block observation. Requires real compliance review, plus A2P/10DLC registration status for SMS sending identity.
 2. **The actual closed-won count** — decides learning feasibility; produced in Phase 1.
-3. **Where the ~200 recordings live** and whether capture was lawful per participant jurisdiction — the rights-manifest process (§10) resolves this per call; unresolved recordings stay quarantined.
+3. **Where the ~200 recordings live** and whether capture was lawful per participant jurisdiction — the rights-manifest process (§10) resolves this per call; unresolved recordings stay metadata-only (or preservation-held only under §10.1.4).
 4. **ManyChat/IG-era thread completeness in GHL** — measured during backfill (§7.3), not assumed.
 5. **Payment source of truth** (GHL payments? Stripe? ThriveCart?) — needed for revenue outcomes.
 6. **Community platform telemetry** ("school group" — platform unverified) — content-consumption signals depend on it.

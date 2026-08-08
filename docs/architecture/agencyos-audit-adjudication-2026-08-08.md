@@ -152,12 +152,12 @@ Quoted passages are from the superseded review artifact (previous architecture),
 | Temporal leakage in historical evaluation | F8 corrections | §9.3, §11.2–11.3, I2 |
 | Prompt-injection boundaries for CRM/retrieved content | F11 corrections | §12, I5 |
 | Experiment, holdout, and evaluation governance | F8/F9/F10 corrections | §11 |
-| Call-recording rights | F13 (MODIFY) | §10, §17 Phase 1 |
+| Call-recording rights | F13 (MODIFY) + §9 shipping-gate residual | §10, §17 Phase 1 |
 | OAuth/webhook requirements | F3 corrections | §7.1–7.2 |
 | Backfill controls | F3/F4/F8 corrections | §7.3, §8, §9.3 |
 | Conflicting legacy ADRs/documents | F12 corrections | §18 + status edits |
 
-All Phase-0 foundation decisions named in the resume mandate are explicit in the canonical document: identity/authorization (§5), consent/data-rights/retention enforcement (§6, §13), call-rights-before-processing with the quarantine exception (§10), event-time `observedAt ≤ T` semantics (§9.3, §11.2), OAuth/webhook verification with idempotency/retries/replay/reconciliation/backfill (§7–§8), immutable evidence-storage semantics (§8.3), and legacy document status (§18.3).
+All Phase-0 foundation decisions named in the resume mandate are explicit in the canonical document: identity/authorization including GHL installation→tenant binding and agency-install location membership (§5.0, §5.1), consent/data-rights/retention enforcement (§6, §13), call-rights-before-processing with preservation-authorized quarantine exception only (§10), event-time `observedAt ≤ T` semantics (§9.3, §11.2), OAuth/webhook verification with idempotency/retries/replay/reconciliation/backfill (§7–§8), immutable evidence-storage semantics via create-only R2 writes (§8.3), and legacy document status (§18.3). Shipping-gate residuals that closed remaining contract gaps are recorded in §9 of this adjudication.
 
 ## 6. Repository changes in this pass
 
@@ -186,6 +186,23 @@ Prescribed for Phase 0 (not performed): ADR-008…015 stubs; CI; schema; all imp
 ## 8. Unresolved items (none block committing these documents)
 
 The following are **discovery gates for later phases**, tracked in canonical §19 — they do not affect the correctness or completeness of the documents submitted for PASS/BLOCK review: consent evidence for the historical lead base and A2P/10DLC registration status (gates Phase 3, not the docs); physical location and rights manifests for the ~200 recordings (gates Phase 1 processing); the actual closed-won count (produced by Phase 1); payment processor and community-platform telemetry; the written budget number (Phase 0 deliverable); **unsigned equity/IP assignment** — flagged as the sharpest business risk for a proprietary-asset strategy, but a legal matter, not an architectural one.
+
+---
+
+## 9. Shipping-gate residual corrections (2026-08-08)
+
+Independent final shipping gate at commit `6fc4fc624f9c37ed79312338d57461201cb3c86f` passed the broader architecture and identified three residual Phase-0 contract blockers. These are documentation corrections to the canonical architecture; they do not reopen resolved audit findings beyond the residual gaps named below. No application code was implemented.
+
+| Residual | Prior adjudication | Verification | Canonical fix |
+|---|---|---|---|
+| Tenant ↔ GHL installation / ingress identity | F3 ACCEPT / F5 ACCEPT incomplete | GHL [AppInstall](https://marketplace.gohighlevel.com/docs/webhook/AppInstall/) / [AppUninstall](https://marketplace.gohighlevel.com/docs/webhook/AppUninstall/) payloads expose `appId`, `companyId`, `locationId` — **no** `installId`. Canonical §5 lacked installation→tenant binding; §7.2 used nonexistent `installId`; §8.1 receipt hash was not tenant/installation-scoped. | Canonical **§5.0**, I4, §7.2 INSTALL/UNINSTALL row, §8.1 |
+| Agency `companyId` install ↔ location webhook `locationId` | Residual after §5.0 | Agency-level INSTALL is `companyId`-keyed; ordinary events (e.g. [InboundMessage](https://marketplace.gohighlevel.com/docs/webhook/InboundMessage/)) carry `locationId` only. First-party bulk/agency flow requires [installedLocations](https://marketplace.gohighlevel.com/docs/ghl/oauth/get-installed-location/) + [locationToken](https://marketplace.gohighlevel.com/docs/ghl/oauth/get-location-access-token/) ([App Distribution](https://marketplace.gohighlevel.com/docs/oauth/AppDistribution/)) — not event-time inference. | Canonical **§5.0** `installationLocationMembership`, ingress precedence, lifecycle deactivation; §7.2 reconciliation column |
+| R2 evidence immutability / purge | F4 ACCEPT / F6 ACCEPT incomplete | R2 has **no** native S3 versioning ([S3 API compatibility](https://developers.cloudflare.com/r2/api/s3/api/)); supports create-only conditionals and [bucket locks](https://developers.cloudflare.com/r2/buckets/bucket-locks/) that block delete/overwrite while active. Canonical assumed “versioning” and purge of “all versions.” | Canonical §1.3 R2 fact, **§8.3**, **§13.3** lock-aware completion, §14.1 |
+| Call-preservation / processor authority | F13 MODIFY incomplete | Prior exception copied audio to R2 while claiming “no vendor disclosure.” Cloudflare’s [Customer DPA](https://www.cloudflare.com/cloudflare-customer-dpa/) treats Cloudflare as Processor of Customer Content stored via the Services. | Canonical **§10.1** capability chain + preservation-authorization before any copy; Phase 1 exit + §19.3 |
+
+**Disposition of F13 MODIFY:** rights-manifest-before-processing remains; the storage-only exception is retained only when copy/possession authority **and** Cloudflare R2 processor/storage authority are recorded first. Otherwise metadata-only.
+
+After these corrections — including the agency-install ↔ location-membership binding — the shipping-gate blocker clusters are closed at the documentation-contract level. R2 and call-rights corrections were not reopened. Phase 0 implementation remains out of mandate for this pass.
 
 ---
 
