@@ -1,0 +1,3 @@
+{
+  "install": "echo \"AgencyOS docs-only workspace ready\" && test -d docs && test -f docs/architecture/agencyos-architecture.md && git --version && node --version && python3 --version"
+}
