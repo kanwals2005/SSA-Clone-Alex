@@ -1,6 +1,6 @@
 # ADR-005: Closed-Won Conversations Are the Training Gold Set
 
-**Status:** Accepted  
+**Status:** Amended 2026-08-08 — closed-won threads are a style/prior corpus + hypothesis source (era-tagged, evaluation-separated), not training data; playbook promotion only via experiments. See `docs/architecture/agencyos-architecture.md` §9, §11, §18  
 **Date:** 2026-08-08  
 **Source:** Alex Call 02  
 

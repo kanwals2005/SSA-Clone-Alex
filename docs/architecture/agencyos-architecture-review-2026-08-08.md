@@ -1,6 +1,6 @@
 # AgencyOS Architecture Review — 2026-08-08
 
-**Status:** Review artifact. Supersedes-in-part `docs/architecture/agencyos-architecture.md` (see §11).
+**Status:** Superseded 2026-08-08 — consolidated into `docs/architecture/agencyos-architecture.md` (canonical); adjudication in `docs/architecture/agencyos-audit-adjudication-2026-08-08.md`. Body preserved unedited because the 2026-08-08 audit cites it by line number.
 **Author:** Architecture review pass requested by Kamal (full transcript coverage + repo inspection + vendor verification).
 **Decision requested:** Adopt the V1 scope in §9 and the roadmap in §10; amend ADRs as listed in §11.
 **Nothing in this document has been implemented.** All file paths marked *(proposed)* do not exist yet.

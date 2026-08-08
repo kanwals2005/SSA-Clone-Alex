@@ -1,6 +1,6 @@
 # ADR-003: Agent OS Autonomy Requires a Funded Spend Card
 
-**Status:** Accepted  
+**Status:** Amended 2026-08-08 — split into a Phase-0 human operating budget/card and Phase-4 agent-initiated spend; card provisioning no longer blocks V1 observation. See `docs/architecture/agencyos-architecture.md` §17–§18  
 **Date:** 2026-08-08  
 **Source:** Alex Call 01 & 02  
 

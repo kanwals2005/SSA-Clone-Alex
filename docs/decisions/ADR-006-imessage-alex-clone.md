@@ -1,6 +1,6 @@
 # ADR-006: iMessage Alex-Clone Is the Primary Outbound Channel
 
-**Status:** Accepted  
+**Status:** Superseded 2026-08-08 — iMessage is a consent-gated experiment arm behind the channel layer, not the primary outbound channel; GHL-native SMS/email is the V1 spine. See `docs/architecture/agencyos-architecture.md` §6, §17 and forthcoming ADR-012  
 **Date:** 2026-08-08  
 **Source:** Alex Call 02  
 

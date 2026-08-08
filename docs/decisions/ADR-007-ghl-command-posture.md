@@ -1,6 +1,6 @@
 # ADR-007: GHL Command — Prefer Wait/Affiliate Over Immediate Rebuild
 
-**Status:** Accepted (provisional)  
+**Status:** Amended 2026-08-08 — strengthened from provisional to firm no-build for this planning horizon; affiliate only within ADR-002 constraints. See `docs/architecture/agencyos-architecture.md` §18  
 **Date:** 2026-08-08  
 **Source:** Alex Call 02  
 

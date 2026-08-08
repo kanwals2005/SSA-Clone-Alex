@@ -3,7 +3,7 @@
 **Owner:** Alex Lobaido (Bloomfield) + Kamal (+ Manny)  
 **Business surface:** SSA (agency-education / AI-agency training business)  
 **Last updated from:** `alex-call-01.md`, `alex-call-02.md` (2026-08-04 recordings)  
-**Product name in use here:** AgencyOS / Agent OS (Hermes + MCP loop)
+**Product name in use here:** AgencyOS / Agent OS — **Status 2026-08-08:** historical snapshot; stack/sequencing superseded by `../architecture/agencyos-architecture.md`
 
 ---
 
